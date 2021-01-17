@@ -57,5 +57,9 @@
     "mocha": "^7.1.1",
     "rollup": "^2.36.2",
     "rollup-plugin-terser": "^7.0.2"
+  },
+  "resolutions": {
+    "@iden3/binfileutils": "0.0.7",
+    "ffjavascript": "0.2.32"
   }
 }
