@@ -4080,89 +4080,14 @@ class BigArray {
     }
 }
 
-async function readBinFile$1(fileName, type, maxVersion, cacheSize, pageSize) {
-
-    const fd = await readExisting$2(fileName, cacheSize, pageSize);
-
-    const b = await fd.read(4);
-    let readedType = "";
-    for (let i=0; i<4; i++) readedType += String.fromCharCode(b[i]);
-
-    if (readedType != type) throw new Error(fileName + ": Invalid File format");
-
-    let v = await fd.readULE32();
-
-    if (v>maxVersion) throw new Error("Version not supported");
-
-    const nSections = await fd.readULE32();
-
-    // Scan sections
-    let sections = [];
-    for (let i=0; i<nSections; i++) {
-        let ht = await fd.readULE32();
-        let hl = await fd.readULE64();
-        if (typeof sections[ht] == "undefined") sections[ht] = [];
-        sections[ht].push({
-            p: fd.pos,
-            size: hl
-        });
-        fd.pos += hl;
-    }
-
-    return {fd, sections};
-}
-
-async function startReadUniqueSection$1(fd, sections, idSection) {
-    if (typeof fd.readingSection !== "undefined") throw new Error("Already reading a section");
-    if (!sections[idSection])  throw new Error(fd.fileName + ": Missing section "+ idSection );
-    if (sections[idSection].length>1) throw new Error(fd.fileName +": Section Duplicated " +idSection);
-
-    fd.pos = sections[idSection][0].p;
-
-    fd.readingSection = sections[idSection][0];
-}
-
-async function endReadSection$1(fd, noCheck) {
-    if (typeof fd.readingSection === "undefined") throw new Error("Not reading a section");
-    if (!noCheck) {
-        if (fd.pos-fd.readingSection.p !=  fd.readingSection.size) throw new Error("Invalid section size reading");
-    }
-    delete fd.readingSection;
-}
-
-async function readBigInt$1(fd, n8, pos) {
-    const buff = await fd.read(n8, pos);
-    return ffjavascript.Scalar.fromRprLE(buff, 0, n8);
-}
-
-async function readSection$1(fd, sections, idSection, offset, length) {
-
-    offset = (typeof offset === "undefined") ? 0 : offset;
-    length = (typeof length === "undefined") ? sections[idSection][0].size - offset : length;
-
-    if (offset + length > sections[idSection][0].size) {
-        throw new Error("Reading out of the range of the section");
-    }
-
-    let buff;
-    if (length < (1 << 30) ) {
-        buff = new Uint8Array(length);
-    } else {
-        buff = new ffjavascript.BigBuffer(length);
-    }
-
-    await fd.readToBuffer(buff, 0, length, sections[idSection][0].p + offset);
-    return buff;
-}
-
 async function readR1csHeader(fd,sections,singleThread) {
 
 
     const res = {};
-    await startReadUniqueSection$1(fd, sections, 1);
+    await startReadUniqueSection(fd, sections, 1);
     // Read Header
     res.n8 = await fd.readULE32();
-    res.prime = await readBigInt$1(fd, res.n8);
+    res.prime = await readBigInt(fd, res.n8);
 
     res.curve = await ffjavascript.getCurveFromR(res.prime, singleThread);
 
@@ -4172,13 +4097,13 @@ async function readR1csHeader(fd,sections,singleThread) {
     res.nPrvInputs = await fd.readULE32();
     res.nLabels = await fd.readULE64();
     res.nConstraints = await fd.readULE32();
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     return res;
 }
 
 async function readConstraints(fd,sections, r1cs, logger, loggerCtx) {
-    const bR1cs = await readSection$1(fd, sections, 2);
+    const bR1cs = await readSection(fd, sections, 2);
     let bR1csPos = 0;
     let constraints;
     if (r1cs.nConstraints>1<<20) {
@@ -4223,7 +4148,7 @@ async function readConstraints(fd,sections, r1cs, logger, loggerCtx) {
 }
 
 async function readMap(fd, sections, r1cs, logger, loggerCtx) {
-    const bMap = await readSection$1(fd, sections, 3);
+    const bMap = await readSection(fd, sections, 3);
     let bMapPos = 0;
     let map;
 
@@ -4254,7 +4179,7 @@ async function readMap(fd, sections, r1cs, logger, loggerCtx) {
 
 async function readR1cs(fileName, loadConstraints, loadMap, singleThread, logger, loggerCtx) {
 
-    const {fd, sections} = await readBinFile$1(fileName, "r1cs", 1, 1<<25, 1<<22);
+    const {fd, sections} = await readBinFile(fileName, "r1cs", 1, 1<<25, 1<<22);
 
     const res = await readR1csHeader(fd, sections, singleThread);
 

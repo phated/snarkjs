@@ -946,6 +946,40 @@ async function readBinFile(fileName, type, maxVersion, cacheSize, pageSize) {
     return {fd, sections};
 }
 
+async function createBinFile(fileName, type, version, nSections, cacheSize, pageSize) {
+
+    const fd = await createOverride(fileName, cacheSize, pageSize);
+
+    const buff = new Uint8Array(4);
+    for (let i=0; i<4; i++) buff[i] = type.charCodeAt(i);
+    await fd.write(buff, 0); // Magic "r1cs"
+
+    await fd.writeULE32(version); // Version
+    await fd.writeULE32(nSections); // Number of Sections
+
+    return fd;
+}
+
+async function startWriteSection(fd, idSection) {
+    if (typeof fd.writingSection !== "undefined") throw new Error("Already writing a section");
+    await fd.writeULE32(idSection); // Header type
+    fd.writingSection = {
+        pSectionSize: fd.pos
+    };
+    await fd.writeULE64(0); // Temporally set to 0 length
+}
+
+async function endWriteSection(fd) {
+    if (typeof fd.writingSection === "undefined") throw new Error("Not writing a section");
+
+    const sectionSize = fd.pos - fd.writingSection.pSectionSize - 8;
+    const oldPos = fd.pos;
+    fd.pos = fd.writingSection.pSectionSize;
+    await fd.writeULE64(sectionSize);
+    fd.pos = oldPos;
+    delete fd.writingSection;
+}
+
 async function startReadUniqueSection(fd, sections, idSection) {
     if (typeof fd.readingSection !== "undefined") throw new Error("Already reading a section");
     if (!sections[idSection])  throw new Error(fd.fileName + ": Missing section "+ idSection );
@@ -964,9 +998,32 @@ async function endReadSection(fd, noCheck) {
     delete fd.readingSection;
 }
 
+async function writeBigInt(fd, n, n8, pos) {
+    const buff = new Uint8Array(n8);
+    ffjavascript.Scalar.toRprLE(buff, 0, n, n8);
+    await fd.write(buff, pos);
+}
+
 async function readBigInt(fd, n8, pos) {
     const buff = await fd.read(n8, pos);
     return ffjavascript.Scalar.fromRprLE(buff, 0, n8);
+}
+
+async function copySection(fdFrom, sections, fdTo, sectionId, size) {
+    if (typeof size === "undefined") {
+        size = sections[sectionId][0].size;
+    }
+    const chunkSize = fdFrom.pageSize;
+    await startReadUniqueSection(fdFrom, sections, sectionId);
+    await startWriteSection(fdTo, sectionId);
+    for (let p=0; p<size; p+=chunkSize) {
+        const l = Math.min(size -p, chunkSize);
+        const buff = await fdFrom.read(l);
+        await fdTo.write(buff);
+    }
+    await endWriteSection(fdTo);
+    await endReadSection(fdFrom, size != sections[sectionId][0].size);
+
 }
 
 async function readSection(fd, sections, idSection, offset, length) {
@@ -987,6 +1044,23 @@ async function readSection(fd, sections, idSection, offset, length) {
 
     await fd.readToBuffer(buff, 0, length, sections[idSection][0].p + offset);
     return buff;
+}
+
+async function sectionIsEqual(fd1, sections1, fd2, sections2, idSection) {
+    const MAX_BUFF_SIZE = fd1.pageSize * 16;
+    await startReadUniqueSection(fd1, sections1, idSection);
+    await startReadUniqueSection(fd2, sections2, idSection);
+    if (sections1[idSection][0].size != sections2[idSection][0].size) return false;
+    const totalBytes=sections1[idSection][0].size;
+    for (let i=0; i<totalBytes; i+= MAX_BUFF_SIZE) {
+        const n = Math.min(totalBytes-i, MAX_BUFF_SIZE);
+        const buff1 = await fd1.read(n);
+        const buff2 = await fd2.read(n);
+        for (let j=0; j<n; j++) if (buff1[j] != buff2[j]) return false;
+    }
+    await endReadSection(fd1);
+    await endReadSection(fd2);
+    return true;
 }
 
 async function readR1csHeader(fd,sections,singleThread) {
@@ -2059,155 +2133,6 @@ function keyFromBeacon(curve, challengeHash, beaconHash, numIterationsExp) {
     return key;
 }
 
-async function readBinFile$1(fileName, type, maxVersion, cacheSize, pageSize) {
-
-    const fd = await readExisting$2(fileName, cacheSize, pageSize);
-
-    const b = await fd.read(4);
-    let readedType = "";
-    for (let i=0; i<4; i++) readedType += String.fromCharCode(b[i]);
-
-    if (readedType != type) throw new Error(fileName + ": Invalid File format");
-
-    let v = await fd.readULE32();
-
-    if (v>maxVersion) throw new Error("Version not supported");
-
-    const nSections = await fd.readULE32();
-
-    // Scan sections
-    let sections = [];
-    for (let i=0; i<nSections; i++) {
-        let ht = await fd.readULE32();
-        let hl = await fd.readULE64();
-        if (typeof sections[ht] == "undefined") sections[ht] = [];
-        sections[ht].push({
-            p: fd.pos,
-            size: hl
-        });
-        fd.pos += hl;
-    }
-
-    return {fd, sections};
-}
-
-async function createBinFile(fileName, type, version, nSections, cacheSize, pageSize) {
-
-    const fd = await createOverride(fileName, cacheSize, pageSize);
-
-    const buff = new Uint8Array(4);
-    for (let i=0; i<4; i++) buff[i] = type.charCodeAt(i);
-    await fd.write(buff, 0); // Magic "r1cs"
-
-    await fd.writeULE32(version); // Version
-    await fd.writeULE32(nSections); // Number of Sections
-
-    return fd;
-}
-
-async function startWriteSection(fd, idSection) {
-    if (typeof fd.writingSection !== "undefined") throw new Error("Already writing a section");
-    await fd.writeULE32(idSection); // Header type
-    fd.writingSection = {
-        pSectionSize: fd.pos
-    };
-    await fd.writeULE64(0); // Temporally set to 0 length
-}
-
-async function endWriteSection(fd) {
-    if (typeof fd.writingSection === "undefined") throw new Error("Not writing a section");
-
-    const sectionSize = fd.pos - fd.writingSection.pSectionSize - 8;
-    const oldPos = fd.pos;
-    fd.pos = fd.writingSection.pSectionSize;
-    await fd.writeULE64(sectionSize);
-    fd.pos = oldPos;
-    delete fd.writingSection;
-}
-
-async function startReadUniqueSection$1(fd, sections, idSection) {
-    if (typeof fd.readingSection !== "undefined") throw new Error("Already reading a section");
-    if (!sections[idSection])  throw new Error(fd.fileName + ": Missing section "+ idSection );
-    if (sections[idSection].length>1) throw new Error(fd.fileName +": Section Duplicated " +idSection);
-
-    fd.pos = sections[idSection][0].p;
-
-    fd.readingSection = sections[idSection][0];
-}
-
-async function endReadSection$1(fd, noCheck) {
-    if (typeof fd.readingSection === "undefined") throw new Error("Not reading a section");
-    if (!noCheck) {
-        if (fd.pos-fd.readingSection.p !=  fd.readingSection.size) throw new Error("Invalid section size reading");
-    }
-    delete fd.readingSection;
-}
-
-async function writeBigInt(fd, n, n8, pos) {
-    const buff = new Uint8Array(n8);
-    ffjavascript.Scalar.toRprLE(buff, 0, n, n8);
-    await fd.write(buff, pos);
-}
-
-async function readBigInt$1(fd, n8, pos) {
-    const buff = await fd.read(n8, pos);
-    return ffjavascript.Scalar.fromRprLE(buff, 0, n8);
-}
-
-async function copySection(fdFrom, sections, fdTo, sectionId, size) {
-    if (typeof size === "undefined") {
-        size = sections[sectionId][0].size;
-    }
-    const chunkSize = fdFrom.pageSize;
-    await startReadUniqueSection$1(fdFrom, sections, sectionId);
-    await startWriteSection(fdTo, sectionId);
-    for (let p=0; p<size; p+=chunkSize) {
-        const l = Math.min(size -p, chunkSize);
-        const buff = await fdFrom.read(l);
-        await fdTo.write(buff);
-    }
-    await endWriteSection(fdTo);
-    await endReadSection$1(fdFrom, size != sections[sectionId][0].size);
-
-}
-
-async function readSection$1(fd, sections, idSection, offset, length) {
-
-    offset = (typeof offset === "undefined") ? 0 : offset;
-    length = (typeof length === "undefined") ? sections[idSection][0].size - offset : length;
-
-    if (offset + length > sections[idSection][0].size) {
-        throw new Error("Reading out of the range of the section");
-    }
-
-    let buff;
-    if (length < (1 << 30) ) {
-        buff = new Uint8Array(length);
-    } else {
-        buff = new ffjavascript.BigBuffer(length);
-    }
-
-    await fd.readToBuffer(buff, 0, length, sections[idSection][0].p + offset);
-    return buff;
-}
-
-async function sectionIsEqual(fd1, sections1, fd2, sections2, idSection) {
-    const MAX_BUFF_SIZE = fd1.pageSize * 16;
-    await startReadUniqueSection$1(fd1, sections1, idSection);
-    await startReadUniqueSection$1(fd2, sections2, idSection);
-    if (sections1[idSection][0].size != sections2[idSection][0].size) return false;
-    const totalBytes=sections1[idSection][0].size;
-    for (let i=0; i<totalBytes; i+= MAX_BUFF_SIZE) {
-        const n = Math.min(totalBytes-i, MAX_BUFF_SIZE);
-        const buff1 = await fd1.read(n);
-        const buff2 = await fd2.read(n);
-        for (let j=0; j<n; j++) if (buff1[j] != buff2[j]) return false;
-    }
-    await endReadSection$1(fd1);
-    await endReadSection$1(fd2);
-    return true;
-}
-
 /*
 Header(1)
     n8
@@ -2335,7 +2260,7 @@ async function newAccumulator(curve, power, fileName, logger) {
 
 async function exportChallenge(pTauFilename, challengeFilename, logger) {
     await Blake2b__default['default'].ready();
-    const {fd: fdFrom, sections} = await readBinFile$1(pTauFilename, "ptau", 1);
+    const {fd: fdFrom, sections} = await readBinFile(pTauFilename, "ptau", 1);
 
     const {curve, power} = await readPTauHeader(fdFrom, sections);
 
@@ -2385,7 +2310,7 @@ async function exportChallenge(pTauFilename, challengeFilename, logger) {
         const sG = G.F.n8*2;
         const nPointsChunk = Math.floor((1<<24)/sG);
 
-        await startReadUniqueSection$1(fdFrom, sections, sectionId);
+        await startReadUniqueSection(fdFrom, sections, sectionId);
         for (let i=0; i< nPoints; i+= nPointsChunk) {
             if (logger) logger.debug(`Exporting ${sectionName}: ${i}/${nPoints}`);
             const n = Math.min(nPoints-i, nPointsChunk);
@@ -2395,7 +2320,7 @@ async function exportChallenge(pTauFilename, challengeFilename, logger) {
             await fdTo.write(buff);
             toHash.update(buff);
         }
-        await endReadSection$1(fdFrom);
+        await endReadSection(fdFrom);
     }
 
 
@@ -2408,7 +2333,7 @@ async function importResponse(oldPtauFilename, contributionFilename, newPTauFile
     const noHash = new Uint8Array(64);
     for (let i=0; i<64; i++) noHash[i] = 0xFF;
 
-    const {fd: fdOld, sections} = await readBinFile$1(oldPtauFilename, "ptau", 1);
+    const {fd: fdOld, sections} = await readBinFile(oldPtauFilename, "ptau", 1);
     const {curve, power} = await readPTauHeader(fdOld, sections);
     const contributions = await readContributions(fdOld, curve, sections);
     const currentContribution = {};
@@ -2715,7 +2640,7 @@ async function verify(tauFilename, logger) {
     let sr;
     await Blake2b__default['default'].ready();
 
-    const {fd, sections} = await readBinFile$1(tauFilename, "ptau", 1);
+    const {fd, sections} = await readBinFile(tauFilename, "ptau", 1);
     const {curve, power, ceremonyPower} = await readPTauHeader(fd, sections);
     const contrs = await readContributions(fd, curve, sections);
 
@@ -2928,7 +2853,7 @@ async function verify(tauFilename, logger) {
         const MAX_CHUNK_SIZE = 1<<16;
         const G = curve[groupName];
         const sG = G.F.n8*2;
-        await startReadUniqueSection$1(fd, sections, idSection);
+        await startReadUniqueSection(fd, sections, idSection);
 
         const singularPoints = [];
 
@@ -2974,7 +2899,7 @@ async function verify(tauFilename, logger) {
             }
 
         }
-        await endReadSection$1(fd);
+        await endReadSection(fd);
 
         return {
             R1: R1,
@@ -3028,7 +2953,7 @@ async function verify(tauFilename, logger) {
             buff_r = new Uint8Array(buff_r.buffer, buff_r.byteOffset, buff_r.byteLength);
 
             if (logger) logger.debug(`reading points Powers${p}...`);
-            await startReadUniqueSection$1(fd, sections, tauSection);
+            await startReadUniqueSection(fd, sections, tauSection);
             buffG = new ffjavascript.BigBuffer(nPoints*sG);
             if (p == power+1) {
                 await fd.readToBuffer(buffG, 0, (nPoints-1)*sG);
@@ -3036,7 +2961,7 @@ async function verify(tauFilename, logger) {
             } else {
                 await fd.readToBuffer(buffG, 0, nPoints*sG);
             }
-            await endReadSection$1(fd, true);
+            await endReadSection(fd, true);
 
             const resTau = await G.multiExpAffine(buffG, buff_r, logger, sectionName + "_" + p);
 
@@ -3063,10 +2988,10 @@ async function verify(tauFilename, logger) {
             buff_r = await curve.Fr.batchFromMontgomery(buff_r);
 
             if (logger) logger.debug(`reading points Lagrange${p}...`);
-            await startReadUniqueSection$1(fd, sections, lagrangeSection);
+            await startReadUniqueSection(fd, sections, lagrangeSection);
             fd.pos += sG*((2 ** p)-1);
             await fd.readToBuffer(buffG, 0, nPoints*sG);
-            await endReadSection$1(fd, true);
+            await endReadSection(fd, true);
 
             const resLagrange = await G.multiExpAffine(buffG, buff_r, logger, sectionName + "_" + p + "_transformed");
 
@@ -3093,7 +3018,7 @@ async function applyKeyToSection(fdOld, sections, fdNew, idSection, curve, group
     const sG = G.F.n8*2;
     const nPoints = sections[idSection][0].size / sG;
 
-    await startReadUniqueSection$1(fdOld, sections,idSection );
+    await startReadUniqueSection(fdOld, sections,idSection );
     await startWriteSection(fdNew, idSection);
 
     let t = first;
@@ -3108,7 +3033,7 @@ async function applyKeyToSection(fdOld, sections, fdNew, idSection, curve, group
     }
 
     await endWriteSection(fdNew);
-    await endReadSection$1(fdOld);
+    await endReadSection(fdOld);
 }
 
 
@@ -3234,7 +3159,7 @@ async function beacon(oldPtauFilename, newPTauFilename, name,  beaconHashStr,num
 
     await Blake2b__default['default'].ready();
 
-    const {fd: fdOld, sections} = await readBinFile$1(oldPtauFilename, "ptau", 1);
+    const {fd: fdOld, sections} = await readBinFile(oldPtauFilename, "ptau", 1);
     const {curve, power, ceremonyPower} = await readPTauHeader(fdOld, sections);
     if (power != ceremonyPower) {
         if (logger) logger.error("This file has been reduced. You cannot contribute into a reduced file.");
@@ -3385,7 +3310,7 @@ async function beacon(oldPtauFilename, newPTauFilename, name,  beaconHashStr,num
 async function contribute(oldPtauFilename, newPTauFilename, name, entropy, logger) {
     await Blake2b__default['default'].ready();
 
-    const {fd: fdOld, sections} = await readBinFile$1(oldPtauFilename, "ptau", 1);
+    const {fd: fdOld, sections} = await readBinFile(oldPtauFilename, "ptau", 1);
     const {curve, power, ceremonyPower} = await readPTauHeader(fdOld, sections);
     if (power != ceremonyPower) {
         if (logger) logger.error("This file has been reduced. You cannot contribute into a reduced file.");
@@ -3539,7 +3464,7 @@ async function contribute(oldPtauFilename, newPTauFilename, name, entropy, logge
 
 async function preparePhase2(oldPtauFilename, newPTauFilename, logger) {
 
-    const {fd: fdOld, sections} = await readBinFile$1(oldPtauFilename, "ptau", 1);
+    const {fd: fdOld, sections} = await readBinFile(oldPtauFilename, "ptau", 1);
     const {curve, power} = await readPTauHeader(fdOld, sections);
 
     const fdNew = await createBinFile(newPTauFilename, "ptau", 1, 11);
@@ -3590,14 +3515,14 @@ async function preparePhase2(oldPtauFilename, newPTauFilename, logger) {
             let buff;
             buff = new ffjavascript.BigBuffer(nPoints*sGin);
 
-            await startReadUniqueSection$1(fdOld, sections, oldSectionId);
+            await startReadUniqueSection(fdOld, sections, oldSectionId);
             if ((oldSectionId == 2)&&(p==power+1)) {
                 await fdOld.readToBuffer(buff, 0,(nPoints-1)*sGin );
                 buff.set(curve.G1.zeroAffine, (nPoints-1)*sGin );
             } else {
                 await fdOld.readToBuffer(buff, 0,nPoints*sGin );
             }
-            await endReadSection$1(fdOld, true);
+            await endReadSection(fdOld, true);
 
 
             buff = await G.lagrangeEvaluations(buff, "affine", "affine", logger, sectionName);
@@ -3658,7 +3583,7 @@ async function preparePhase2(oldPtauFilename, newPTauFilename, logger) {
 
 async function truncate(ptauFilename, template, logger) {
 
-    const {fd: fdOld, sections} = await readBinFile$1(ptauFilename, "ptau", 1);
+    const {fd: fdOld, sections} = await readBinFile(ptauFilename, "ptau", 1);
     const {curve, power, ceremonyPower} = await readPTauHeader(fdOld, sections);
 
     const sG1 = curve.G1.F.n8*2;
@@ -3701,7 +3626,7 @@ async function truncate(ptauFilename, template, logger) {
 
 async function convert(oldPtauFilename, newPTauFilename, logger) {
 
-    const {fd: fdOld, sections} = await readBinFile$1(oldPtauFilename, "ptau", 1);
+    const {fd: fdOld, sections} = await readBinFile(oldPtauFilename, "ptau", 1);
     const {curve, power} = await readPTauHeader(fdOld, sections);
 
     const fdNew = await createBinFile(newPTauFilename, "ptau", 1, 11);
@@ -3735,13 +3660,13 @@ async function convert(oldPtauFilename, newPTauFilename, logger) {
 
         const size = sections[newSectionId][0].size;
         const chunkSize = fdOld.pageSize;
-        await startReadUniqueSection$1(fdOld, sections, newSectionId);
+        await startReadUniqueSection(fdOld, sections, newSectionId);
         for (let p=0; p<size; p+=chunkSize) {
             const l = Math.min(size -p, chunkSize);
             const buff = await fdOld.read(l);
             await fdNew.write(buff);
         }
-        await endReadSection$1(fdOld);
+        await endReadSection(fdOld);
 
         if (oldSectionId == 2) {
             await processSectionPower(power+1);
@@ -3757,14 +3682,14 @@ async function convert(oldPtauFilename, newPTauFilename, logger) {
             let buff;
             buff = new ffjavascript.BigBuffer(nPoints*sGin);
 
-            await startReadUniqueSection$1(fdOld, sections, oldSectionId);
+            await startReadUniqueSection(fdOld, sections, oldSectionId);
             if ((oldSectionId == 2)&&(p==power+1)) {
                 await fdOld.readToBuffer(buff, 0,(nPoints-1)*sGin );
                 buff.set(curve.G1.zeroAffine, (nPoints-1)*sGin );
             } else {
                 await fdOld.readToBuffer(buff, 0,nPoints*sGin );
             }
-            await endReadSection$1(fdOld, true);
+            await endReadSection(fdOld, true);
 
             buff = await G.lagrangeEvaluations(buff, "affine", "affine", logger, sectionName);
             await fdNew.write(buff);
@@ -3826,7 +3751,7 @@ async function convert(oldPtauFilename, newPTauFilename, logger) {
 }
 
 async function exportJson(pTauFilename, verbose) {
-    const {fd, sections} = await readBinFile$1(pTauFilename, "ptau", 1);
+    const {fd, sections} = await readBinFile(pTauFilename, "ptau", 1);
 
     const {curve, power} = await readPTauHeader(fd, sections);
 
@@ -3857,13 +3782,13 @@ async function exportJson(pTauFilename, verbose) {
         const sG = G.F.n8*2;
 
         const res = [];
-        await startReadUniqueSection$1(fd, sections, sectionId);
+        await startReadUniqueSection(fd, sections, sectionId);
         for (let i=0; i< nPoints; i++) {
             if ((verbose)&&i&&(i%10000 == 0)) console.log(`${sectionName}: ` + i);
             const buff = await fd.read(sG);
             res.push(G.fromRprLEM(buff, 0));
         }
-        await endReadSection$1(fd);
+        await endReadSection(fd);
 
         return res;
     }
@@ -3873,7 +3798,7 @@ async function exportJson(pTauFilename, verbose) {
         const sG = G.F.n8*2;
 
         const res = [];
-        await startReadUniqueSection$1(fd, sections, sectionId);
+        await startReadUniqueSection(fd, sections, sectionId);
         for (let p=0; p<=power; p++) {
             if (verbose) console.log(`${sectionName}: Power: ${p}`);
             res[p] = [];
@@ -3884,7 +3809,7 @@ async function exportJson(pTauFilename, verbose) {
                 res[p].push(G.fromRprLEM(buff, 0));
             }
         }
-        await endReadSection$1(fd);
+        await endReadSection(fd);
         return res;
     }
 
@@ -3979,9 +3904,9 @@ async function newZKey(r1csName, ptauName, zkeyName, logger) {
     await Blake2b__default['default'].ready();
     const csHasher = Blake2b__default['default'](64);
 
-    const {fd: fdPTau, sections: sectionsPTau} = await readBinFile$1(ptauName, "ptau", 1, 1<<22, 1<<24);
+    const {fd: fdPTau, sections: sectionsPTau} = await readBinFile(ptauName, "ptau", 1, 1<<22, 1<<24);
     const {curve, power} = await readPTauHeader(fdPTau, sectionsPTau);
-    const {fd: fdR1cs, sections: sectionsR1cs} = await readBinFile$1(r1csName, "r1cs", 1, 1<<22, 1<<24);
+    const {fd: fdR1cs, sections: sectionsR1cs} = await readBinFile(r1csName, "r1cs", 1, 1<<22, 1<<24);
     const r1cs = await readR1csHeader(fdR1cs, sectionsR1cs, false);
 
     const fdZKey = await createBinFile(zkeyName, "zkey", 1, 10, 1<<22, 1<<24);
@@ -4071,7 +3996,7 @@ async function newZKey(r1csName, ptauName, zkeyName, logger) {
     await endWriteSection(fdZKey);
 
     if (logger) logger.info("Reading r1cs");
-    let sR1cs = await readSection$1(fdR1cs, sectionsR1cs, 2);
+    let sR1cs = await readSection(fdR1cs, sectionsR1cs, 2);
 
     const A = new BigArray$1(r1cs.nVars);
     const B1 = new BigArray$1(r1cs.nVars);
@@ -4080,13 +4005,13 @@ async function newZKey(r1csName, ptauName, zkeyName, logger) {
     const IC = new Array(nPublic+1);
 
     if (logger) logger.info("Reading tauG1");
-    let sTauG1 = await readSection$1(fdPTau, sectionsPTau, 12, (domainSize -1)*sG1, domainSize*sG1);
+    let sTauG1 = await readSection(fdPTau, sectionsPTau, 12, (domainSize -1)*sG1, domainSize*sG1);
     if (logger) logger.info("Reading tauG2");
-    let sTauG2 = await readSection$1(fdPTau, sectionsPTau, 13, (domainSize -1)*sG2, domainSize*sG2);
+    let sTauG2 = await readSection(fdPTau, sectionsPTau, 13, (domainSize -1)*sG2, domainSize*sG2);
     if (logger) logger.info("Reading alphatauG1");
-    let sAlphaTauG1 = await readSection$1(fdPTau, sectionsPTau, 14, (domainSize -1)*sG1, domainSize*sG1);
+    let sAlphaTauG1 = await readSection(fdPTau, sectionsPTau, 14, (domainSize -1)*sG1, domainSize*sG1);
     if (logger) logger.info("Reading betatauG1");
-    let sBetaTauG1 = await readSection$1(fdPTau, sectionsPTau, 15, (domainSize -1)*sG1, domainSize*sG1);
+    let sBetaTauG1 = await readSection(fdPTau, sectionsPTau, 15, (domainSize -1)*sG1, domainSize*sG1);
 
     await processConstraints();
 
@@ -4121,7 +4046,7 @@ async function newZKey(r1csName, ptauName, zkeyName, logger) {
         await startWriteSection(fdZKey, 9);
         const buffOut = new ffjavascript.BigBuffer(domainSize*sG1);
         if (cirPower < curve.Fr.s) {
-            let sTauG1 = await readSection$1(fdPTau, sectionsPTau, 12, (domainSize*2-1)*sG1, domainSize*2*sG1);
+            let sTauG1 = await readSection(fdPTau, sectionsPTau, 12, (domainSize*2-1)*sG1, domainSize*2*sG1);
             for (let i=0; i< domainSize; i++) {
                 if ((logger)&&(i%10000 == 0)) logger.debug(`spliting buffer: ${i}/${domainSize}`);
                 const buff = sTauG1.slice( (i*2+1)*sG1, (i*2+1)*sG1 + sG1 );
@@ -4593,22 +4518,22 @@ async function readHeader(fd, sections, protocol) {
 
     // Read Header
     /////////////////////
-    await startReadUniqueSection$1(fd, sections, 1);
+    await startReadUniqueSection(fd, sections, 1);
     const protocolId = await fd.readULE32();
     if (protocolId != 1) throw new Error("File is not groth");
     zkey.protocol = "groth16";
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     // Read Groth Header
     /////////////////////
-    await startReadUniqueSection$1(fd, sections, 2);
+    await startReadUniqueSection(fd, sections, 2);
     const n8q = await fd.readULE32();
     zkey.n8q = n8q;
-    zkey.q = await readBigInt$1(fd, n8q);
+    zkey.q = await readBigInt(fd, n8q);
 
     const n8r = await fd.readULE32();
     zkey.n8r = n8r;
-    zkey.r = await readBigInt$1(fd, n8r);
+    zkey.r = await readBigInt(fd, n8r);
 
     let curve = await getCurveFromQ(zkey.q);
 
@@ -4622,14 +4547,14 @@ async function readHeader(fd, sections, protocol) {
     zkey.vk_gamma_2 = await readG2(fd, curve);
     zkey.vk_delta_1 = await readG1(fd, curve);
     zkey.vk_delta_2 = await readG2(fd, curve);
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     return zkey;
 
 }
 
 async function readZKey(fileName) {
-    const {fd, sections} = await readBinFile$1(fileName, "zkey", 1);
+    const {fd, sections} = await readBinFile(fileName, "zkey", 1);
 
     const zkey = await readHeader(fd, sections, "groth16");
 
@@ -4642,18 +4567,18 @@ async function readZKey(fileName) {
 
     // Read IC Section
     ///////////
-    await startReadUniqueSection$1(fd, sections, 3);
+    await startReadUniqueSection(fd, sections, 3);
     zkey.IC = [];
     for (let i=0; i<= zkey.nPublic; i++) {
         const P = await readG1(fd, curve);
         zkey.IC.push(P);
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
 
     // Read Coefs
     ///////////
-    await startReadUniqueSection$1(fd, sections, 4);
+    await startReadUniqueSection(fd, sections, 4);
     const nCCoefs = await fd.readULE32();
     zkey.ccoefs = [];
     for (let i=0; i<nCCoefs; i++) {
@@ -4668,70 +4593,70 @@ async function readZKey(fileName) {
             value: v
         });
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     // Read A points
     ///////////
-    await startReadUniqueSection$1(fd, sections, 5);
+    await startReadUniqueSection(fd, sections, 5);
     zkey.A = [];
     for (let i=0; i<zkey.nVars; i++) {
         const A = await readG1(fd, curve);
         zkey.A[i] = A;
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
 
     // Read B1
     ///////////
-    await startReadUniqueSection$1(fd, sections, 6);
+    await startReadUniqueSection(fd, sections, 6);
     zkey.B1 = [];
     for (let i=0; i<zkey.nVars; i++) {
         const B1 = await readG1(fd, curve);
 
         zkey.B1[i] = B1;
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
 
     // Read B2 points
     ///////////
-    await startReadUniqueSection$1(fd, sections, 7);
+    await startReadUniqueSection(fd, sections, 7);
     zkey.B2 = [];
     for (let i=0; i<zkey.nVars; i++) {
         const B2 = await readG2(fd, curve);
         zkey.B2[i] = B2;
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
 
     // Read C points
     ///////////
-    await startReadUniqueSection$1(fd, sections, 8);
+    await startReadUniqueSection(fd, sections, 8);
     zkey.C = [];
     for (let i=zkey.nPublic+1; i<zkey.nVars; i++) {
         const C = await readG1(fd, curve);
 
         zkey.C[i] = C;
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
 
     // Read H points
     ///////////
-    await startReadUniqueSection$1(fd, sections, 9);
+    await startReadUniqueSection(fd, sections, 9);
     zkey.hExps = [];
     for (let i=0; i<zkey.domainSize; i++) {
         const H = await readG1(fd, curve);
         zkey.hExps.push(H);
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     await fd.close();
 
     return zkey;
 
     async function readFr2() {
-        const n = await readBigInt$1(fd, zkey.n8r);
+        const n = await readBigInt(fd, zkey.n8r);
         return Fr.mul(n, Rri2);
     }
 
@@ -4777,7 +4702,7 @@ async function readContribution$1(fd, curve) {
 
 
 async function readMPCParams(fd, curve, sections) {
-    await startReadUniqueSection$1(fd, sections, 10);
+    await startReadUniqueSection(fd, sections, 10);
     const res = { contributions: []};
     res.csHash = await fd.read(64);
     const n = await fd.readULE32();
@@ -4785,7 +4710,7 @@ async function readMPCParams(fd, curve, sections) {
         const c = await readContribution$1(fd, curve);
         res.contributions.push(c);
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     return res;
 }
@@ -4855,7 +4780,7 @@ function hashPubKey(hasher, curve, c) {
 
 async function phase2exportMPCParams(zkeyName, mpcparamsName, logger) {
 
-    const {fd: fdZKey, sections: sectionsZKey} = await readBinFile$1(zkeyName, "zkey", 2);
+    const {fd: fdZKey, sections: sectionsZKey} = await readBinFile(zkeyName, "zkey", 2);
     const zkey = await readHeader(fdZKey, sectionsZKey, "groth16");
 
     const curve = await getCurveFromQ(zkey.q);
@@ -4878,7 +4803,7 @@ async function phase2exportMPCParams(zkeyName, mpcparamsName, logger) {
 
     // IC
     let buffBasesIC;
-    buffBasesIC = await readSection$1(fdZKey, sectionsZKey, 3);
+    buffBasesIC = await readSection(fdZKey, sectionsZKey, 3);
     buffBasesIC = await curve.G1.batchLEMtoU(buffBasesIC);
 
     await writePointArray("G1", buffBasesIC);
@@ -4886,7 +4811,7 @@ async function phase2exportMPCParams(zkeyName, mpcparamsName, logger) {
     /////////////////////
     // h Section
     /////////////////////
-    const buffBasesH_Lodd = await readSection$1(fdZKey, sectionsZKey, 9);
+    const buffBasesH_Lodd = await readSection(fdZKey, sectionsZKey, 9);
 
     let buffBasesH_Tau;
     buffBasesH_Tau = await curve.G1.fft(buffBasesH_Lodd, "affine", "jacobian", logger);
@@ -4901,7 +4826,7 @@ async function phase2exportMPCParams(zkeyName, mpcparamsName, logger) {
     // L section
     /////////////////////
     let buffBasesC;
-    buffBasesC = await readSection$1(fdZKey, sectionsZKey, 8);
+    buffBasesC = await readSection(fdZKey, sectionsZKey, 8);
     buffBasesC = await curve.G1.batchLEMtoU(buffBasesC);
     await writePointArray("G1", buffBasesC);
 
@@ -4909,7 +4834,7 @@ async function phase2exportMPCParams(zkeyName, mpcparamsName, logger) {
     // A Section (C section)
     /////////////////////
     let buffBasesA;
-    buffBasesA = await readSection$1(fdZKey, sectionsZKey, 5);
+    buffBasesA = await readSection(fdZKey, sectionsZKey, 5);
     buffBasesA = await curve.G1.batchLEMtoU(buffBasesA);
     await writePointArray("G1", buffBasesA);
 
@@ -4917,7 +4842,7 @@ async function phase2exportMPCParams(zkeyName, mpcparamsName, logger) {
     // B1 Section
     /////////////////////
     let buffBasesB1;
-    buffBasesB1 = await readSection$1(fdZKey, sectionsZKey, 6);
+    buffBasesB1 = await readSection(fdZKey, sectionsZKey, 6);
     buffBasesB1 = await curve.G1.batchLEMtoU(buffBasesB1);
     await writePointArray("G1", buffBasesB1);
 
@@ -4925,7 +4850,7 @@ async function phase2exportMPCParams(zkeyName, mpcparamsName, logger) {
     // B2 Section
     /////////////////////
     let buffBasesB2;
-    buffBasesB2 = await readSection$1(fdZKey, sectionsZKey, 7);
+    buffBasesB2 = await readSection(fdZKey, sectionsZKey, 7);
     buffBasesB2 = await curve.G2.batchLEMtoU(buffBasesB2);
     await writePointArray("G2", buffBasesB2);
 
@@ -4986,7 +4911,7 @@ async function phase2exportMPCParams(zkeyName, mpcparamsName, logger) {
 
 async function phase2importMPCParams(zkeyNameOld, mpcparamsName, zkeyNameNew, name, logger) {
 
-    const {fd: fdZKeyOld, sections: sectionsZKeyOld} = await readBinFile$1(zkeyNameOld, "zkey", 2);
+    const {fd: fdZKeyOld, sections: sectionsZKeyOld} = await readBinFile(zkeyNameOld, "zkey", 2);
     const zkeyHeader = await readHeader(fdZKeyOld, sectionsZKeyOld, "groth16");
 
     const curve = await getCurveFromQ(zkeyHeader.q);
@@ -5186,7 +5111,7 @@ async function phase2verifyFromInit(initFileName, pTauFileName, zkeyFileName, lo
     let sr;
     await Blake2b__default['default'].ready();
 
-    const {fd, sections} = await readBinFile$1(zkeyFileName, "zkey", 2);
+    const {fd, sections} = await readBinFile(zkeyFileName, "zkey", 2);
     const zkey = await readHeader(fd, sections, "groth16");
 
     const curve = await getCurveFromQ(zkey.q);
@@ -5250,7 +5175,7 @@ async function phase2verifyFromInit(initFileName, pTauFileName, zkeyFileName, lo
     }
 
 
-    const {fd: fdInit, sections: sectionsInit} = await readBinFile$1(initFileName, "zkey", 2);
+    const {fd: fdInit, sections: sectionsInit} = await readBinFile(initFileName, "zkey", 2);
     const zkeyInit = await readHeader(fdInit, sectionsInit, "groth16");
 
     if (  (!ffjavascript.Scalar.eq(zkeyInit.q, zkey.q))
@@ -5383,8 +5308,8 @@ async function phase2verifyFromInit(initFileName, pTauFileName, zkeyFileName, lo
         const MAX_CHUNK_SIZE = 1<<20;
         const G = curve[groupName];
         const sG = G.F.n8*2;
-        await startReadUniqueSection$1(fd1, sections1, idSection);
-        await startReadUniqueSection$1(fd2, sections2, idSection);
+        await startReadUniqueSection(fd1, sections1, idSection);
+        await startReadUniqueSection(fd2, sections2, idSection);
 
         let R1 = G.zero;
         let R2 = G.zero;
@@ -5407,8 +5332,8 @@ async function phase2verifyFromInit(initFileName, pTauFileName, zkeyFileName, lo
             R1 = G.add(R1, r1);
             R2 = G.add(R2, r2);
         }
-        await endReadSection$1(fd1);
-        await endReadSection$1(fd2);
+        await endReadSection(fd1);
+        await endReadSection(fd2);
 
         if (nPoints == 0) return true;
 
@@ -5424,7 +5349,7 @@ async function phase2verifyFromInit(initFileName, pTauFileName, zkeyFileName, lo
         const Fr = curve.Fr;
         const sG = G.F.n8*2;
 
-        const {fd: fdPTau, sections: sectionsPTau} = await readBinFile$1(pTauFileName, "ptau", 1);
+        const {fd: fdPTau, sections: sectionsPTau} = await readBinFile(pTauFileName, "ptau", 1);
 
         let buff_r = new ffjavascript.BigBuffer(zkey.domainSize * zkey.n8r);
 
@@ -5477,7 +5402,7 @@ async function phase2verifyFromInit(initFileName, pTauFileName, zkeyFileName, lo
         buff_r = await Fr.fft(buff_r);
         buff_r = await Fr.batchFromMontgomery(buff_r);
 
-        await startReadUniqueSection$1(fd, sections, 9);
+        await startReadUniqueSection(fd, sections, 9);
         let R2 = G.zero;
         for (let i=0; i<zkey.domainSize; i += MAX_CHUNK_SIZE) {
             if (logger) logger.debug(`H Verificaition(lagrange):  ${i}/${zkey.domainSize}`);
@@ -5489,7 +5414,7 @@ async function phase2verifyFromInit(initFileName, pTauFileName, zkeyFileName, lo
 
             R2 = G.add(R2, r);
         }
-        await endReadSection$1(fd);
+        await endReadSection(fd);
 
         sr = await sameRatio$2(curve, R1, R2, zkey.vk_delta_2, zkeyInit.vk_delta_2);
         if (sr !== true) return false;
@@ -5578,7 +5503,7 @@ async function phase2verifyFromR1cs(r1csFileName, pTauFileName, zkeyFileName, lo
 async function phase2contribute(zkeyNameOld, zkeyNameNew, name, entropy, logger) {
     await Blake2b__default['default'].ready();
 
-    const {fd: fdOld, sections: sections} = await readBinFile$1(zkeyNameOld, "zkey", 2);
+    const {fd: fdOld, sections: sections} = await readBinFile(zkeyNameOld, "zkey", 2);
     const zkey = await readHeader(fdOld, sections, "groth16");
 
     const curve = await getCurveFromQ(zkey.q);
@@ -5676,7 +5601,7 @@ async function beacon$1(zkeyNameOld, zkeyNameNew, name, beaconHashStr, numIterat
     }
 
 
-    const {fd: fdOld, sections: sections} = await readBinFile$1(zkeyNameOld, "zkey", 2);
+    const {fd: fdOld, sections: sections} = await readBinFile(zkeyNameOld, "zkey", 2);
     const zkey = await readHeader(fdOld, sections, "groth16");
 
     const curve = await getCurveFromQ(zkey.q);
@@ -5924,7 +5849,7 @@ const {stringifyBigInts: stringifyBigInts$1} = ffjavascript.utils;
 
 async function zkeyExportVerificationKey(zkeyName, logger) {
 
-    const {fd, sections} = await readBinFile$1(zkeyName, "zkey", 2);
+    const {fd, sections} = await readBinFile(zkeyName, "zkey", 2);
     const zkey = await readHeader(fd, sections, "groth16");
 
     const curve = await getCurveFromQ(zkey.q);
@@ -5948,14 +5873,14 @@ async function zkeyExportVerificationKey(zkeyName, logger) {
 
     // Read IC Section
     ///////////
-    await startReadUniqueSection$1(fd, sections, 3);
+    await startReadUniqueSection(fd, sections, 3);
     vKey.IC = [];
     for (let i=0; i<= zkey.nPublic; i++) {
         const buff = await fd.read(sG1);
         const P = curve.G1.toObject(buff);
         vKey.IC.push(P);
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     vKey = stringifyBigInts$1(vKey);
 
@@ -6053,11 +5978,11 @@ async function writeBin(fd, witnessBin, prime) {
 
 async function readHeader$1(fd, sections) {
 
-    await startReadUniqueSection$1(fd, sections, 1);
+    await startReadUniqueSection(fd, sections, 1);
     const n8 = await fd.readULE32();
-    const q = await readBigInt$1(fd, n8);
+    const q = await readBigInt(fd, n8);
     const nWitness = await fd.readULE32();
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     return {n8, q, nWitness};
 
@@ -6065,17 +5990,17 @@ async function readHeader$1(fd, sections) {
 
 async function read(fileName) {
 
-    const {fd, sections} = await readBinFile$1(fileName, "wtns", 2);
+    const {fd, sections} = await readBinFile(fileName, "wtns", 2);
 
     const {n8, nWitness} = await readHeader$1(fd, sections);
 
-    await startReadUniqueSection$1(fd, sections, 2);
+    await startReadUniqueSection(fd, sections, 2);
     const res = [];
     for (let i=0; i<nWitness; i++) {
-        const v = await readBigInt$1(fd, n8);
+        const v = await readBigInt(fd, n8);
         res.push(v);
     }
-    await endReadSection$1(fd);
+    await endReadSection(fd);
 
     await fd.close();
 
@@ -6085,11 +6010,11 @@ async function read(fileName) {
 const {stringifyBigInts: stringifyBigInts$2} = ffjavascript.utils;
 
 async function groth16Prove(zkeyFileName, witnessFileName, logger) {
-    const {fd: fdWtns, sections: sectionsWtns} = await readBinFile$1(witnessFileName, "wtns", 2, 1<<25, 1<<23);
+    const {fd: fdWtns, sections: sectionsWtns} = await readBinFile(witnessFileName, "wtns", 2, 1<<25, 1<<23);
 
     const wtns = await readHeader$1(fdWtns, sectionsWtns);
 
-    const {fd: fdZKey, sections: sectionsZKey} = await readBinFile$1(zkeyFileName, "zkey", 2, 1<<25, 1<<23);
+    const {fd: fdZKey, sections: sectionsZKey} = await readBinFile(zkeyFileName, "zkey", 2, 1<<25, 1<<23);
 
     const zkey = await readHeader(fdZKey, sectionsZKey, "groth16");
 
@@ -6109,9 +6034,9 @@ async function groth16Prove(zkeyFileName, witnessFileName, logger) {
     const power = log2(zkey.domainSize);
 
     if (logger) logger.debug("Reading Wtns");
-    const buffWitness = await readSection$1(fdWtns, sectionsWtns, 2);
+    const buffWitness = await readSection(fdWtns, sectionsWtns, 2);
     if (logger) logger.debug("Reading Coeffs");
-    const buffCoeffs = await readSection$1(fdZKey, sectionsZKey, 4);
+    const buffCoeffs = await readSection(fdZKey, sectionsZKey, 4);
 
     if (logger) logger.debug("Building ABC");
     const [buffA_T, buffB_T, buffC_T] = await buldABC1(curve, zkey, buffWitness, buffCoeffs, logger);
@@ -6136,23 +6061,23 @@ async function groth16Prove(zkeyFileName, witnessFileName, logger) {
     let proof = {};
 
     if (logger) logger.debug("Reading A Points");
-    const buffBasesA = await readSection$1(fdZKey, sectionsZKey, 5);
+    const buffBasesA = await readSection(fdZKey, sectionsZKey, 5);
     proof.pi_a = await curve.G1.multiExpAffine(buffBasesA, buffWitness, logger, "multiexp A");
 
     if (logger) logger.debug("Reading B1 Points");
-    const buffBasesB1 = await readSection$1(fdZKey, sectionsZKey, 6);
+    const buffBasesB1 = await readSection(fdZKey, sectionsZKey, 6);
     let pib1 = await curve.G1.multiExpAffine(buffBasesB1, buffWitness, logger, "multiexp B1");
 
     if (logger) logger.debug("Reading B2 Points");
-    const buffBasesB2 = await readSection$1(fdZKey, sectionsZKey, 7);
+    const buffBasesB2 = await readSection(fdZKey, sectionsZKey, 7);
     proof.pi_b = await curve.G2.multiExpAffine(buffBasesB2, buffWitness, logger, "multiexp B2");
 
     if (logger) logger.debug("Reading C Points");
-    const buffBasesC = await readSection$1(fdZKey, sectionsZKey, 8);
+    const buffBasesC = await readSection(fdZKey, sectionsZKey, 8);
     proof.pi_c = await curve.G1.multiExpAffine(buffBasesC, buffWitness.slice((zkey.nPublic+1)*curve.Fr.n8), logger, "multiexp C");
 
     if (logger) logger.debug("Reading H Points");
-    const buffBasesH = await readSection$1(fdZKey, sectionsZKey, 9);
+    const buffBasesH = await readSection(fdZKey, sectionsZKey, 9);
     const resH = await curve.G1.multiExpAffine(buffBasesH, buffPodd_T, logger, "multiexp H");
 
     const r = curve.Fr.random();
