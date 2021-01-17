@@ -3,6 +3,7 @@ import Blake2b from "blake2b-wasm";
 import readline from "readline";
 import { ChaCha } from "ffjavascript";
 import crypto from "crypto";
+import { Buffer } from "buffer";
 
 const _revTable = [];
 for (let i=0; i<256; i++) {
