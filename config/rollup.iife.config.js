@@ -24,7 +24,7 @@ export default {
             readline: empty,
             worker_threads: empty,
         }),
-        nodeResolve(),
+        nodeResolve({ preferBuiltins: false }),
         commonJS(),
         replace({ "process.browser": !!process.env.BROWSER }),
     ]
