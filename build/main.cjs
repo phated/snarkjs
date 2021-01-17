@@ -7,6 +7,7 @@ var fs = require('fs');
 var Blake2b = require('blake2b-wasm');
 var readline = require('readline');
 var crypto = require('crypto');
+var buffer = require('buffer');
 var circomRuntime = require('circom_runtime');
 
 function _interopDefaultLegacy (e) { return e && typeof e === 'object' && 'default' in e ? e : { 'default': e }; }
@@ -1109,7 +1110,7 @@ async function getRandomRng(entropy) {
     hasher.update(crypto__default['default'].randomBytes(64));
     const enc = new TextEncoder(); // always utf-8
     hasher.update(enc.encode(entropy));
-    const hash = Buffer.from(hasher.digest());
+    const hash = buffer.Buffer.from(hasher.digest());
 
     const seed = [];
     for (let i=0;i<8;i++) {
