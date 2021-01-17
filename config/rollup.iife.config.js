@@ -10,7 +10,7 @@ export default {
     output: {
         file: "build/snarkjs.js",
         format: "iife",
-        sourcemap: "inline",
+        sourcemap: true,
         globals: {
             os: "null"
         },
