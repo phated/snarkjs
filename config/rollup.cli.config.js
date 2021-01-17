@@ -1,3 +1,4 @@
+import { builtinModules as builtin } from 'module';
 import { nodeResolve } from "@rollup/plugin-node-resolve";
 import commonJS from "@rollup/plugin-commonjs";
 import json from '@rollup/plugin-json';
@@ -10,12 +11,7 @@ export default {
         banner: "#! /usr/bin/env node\n",
     },
     external: [
-        "fs",
-        "os",
-        "worker_threads",
-        "readline",
-        "crypto",
-        "path",
+        ...builtin,
         "big-integer",
         "wasmsnark",
         "circom_runtime",

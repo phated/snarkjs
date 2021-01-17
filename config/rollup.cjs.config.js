@@ -1,3 +1,4 @@
+import { builtinModules as builtin } from 'module';
 import { nodeResolve } from "@rollup/plugin-node-resolve";
 import commonJS from "@rollup/plugin-commonjs";
 
@@ -8,12 +9,7 @@ export default {
         format: "cjs",
     },
     external: [
-        "fs",
-        "os",
-        "worker_threads",
-        "readline",
-        "crypto",
-        "path",
+        ...builtin,
         "big-integer",
         "wasmsnark",
         "circom_runtime",
